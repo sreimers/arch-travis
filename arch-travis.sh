@@ -18,16 +18,17 @@
 # Script for setting up and running a travis-ci build in an up to date
 # Arch Linux chroot
 
-ARCH_TRAVIS_MIRROR=${ARCH_TRAVIS_MIRROR:-"https://lug.mtu.edu/archlinux"}
-ARCH_TRAVIS_ARCH_ISO=${ARCH_TRAVIS_ARCH_ISO:-"$(date +%Y.%m).01"}
+ARCH_TRAVIS_MIRROR=${ARCH_TRAVIS_MIRROR:-"https://mirrors.lug.mtu.edu/archlinux"}
+ARCH_TRAVIS_ARCH=${ARCH_TRAVIS_ARCH:-"x86_64"}
 mirror_entry='Server = '$ARCH_TRAVIS_MIRROR'/\$repo/os/\$arch'
-archive="archlinux-bootstrap-$ARCH_TRAVIS_ARCH_ISO-x86_64.tar.gz"
-default_root="root.x86_64"
+ARCH_TRAVIS_ROOT_ARCHIVE=""
+default_root="root.${ARCH_TRAVIS_ARCH}"
 ARCH_TRAVIS_CHROOT=${ARCH_TRAVIS_CHROOT:-"$default_root"}
 user="travis"
 user_home="/home/$user"
-user_build_dir="/build"
-user_uid=$UID
+user_build_dir=$(pwd)
+uid=$UID
+gid=$GID
 
 if [ -n "$CC" ]; then
   # store travis CC
@@ -36,6 +37,8 @@ if [ -n "$CC" ]; then
   CC=gcc
 fi
 
+GOROOT=""
+
 
 # default packages
 default_packages=("base-devel" "git")
@@ -43,33 +46,74 @@ default_packages=("base-devel" "git")
 # pacman.conf repository line
 repo_line=70
 
+# try to find the latest iso by iterating through the dates of the current
+# month, falling back to the last month if needed.
+get_base_archive() {
+  local months=(
+    $(date +%Y.%m)
+    $(date +%Y.%m -d "-1 month")
+  )
+
+  for date in "${months[@]}"; do
+      echo $date
+    for i in {1..15}; do
+      local iso_date="$date"
+      if [ "$i" -lt 10 ]; then
+        iso_date="$date.0$i"
+      else
+        iso_date="$date.$i"
+      fi
+
+      ARCH_TRAVIS_ROOT_ARCHIVE="archlinux-bootstrap-${iso_date}-${ARCH_TRAVIS_ARCH}.tar.gz"
+      local url="$ARCH_TRAVIS_MIRROR/iso/$iso_date/$ARCH_TRAVIS_ROOT_ARCHIVE"
+
+      if [ -f "$ARCH_TRAVIS_ROOT_ARCHIVE" ]; then
+          return
+      fi
+
+      echo $url
+      curl --fail -O $url 2>&1
+      local ret=$?
+
+      if [ $ret -eq 0 ]; then
+        return
+      fi
+    done
+  done
+}
+
 # setup working Arch Linux chroot
 setup_chroot() {
   arch_msg "Setting up Arch chroot"
 
-  if [ ! -f $archive ]; then
-    # get root fs
-    local curl=$(curl --fail -O "$ARCH_TRAVIS_MIRROR/iso/$ARCH_TRAVIS_ARCH_ISO/$archive" 2>&1)
+  # if [ ! -f $archive ]; then
+  #   # get root fs
+  #   curl --fail -O "$ARCH_TRAVIS_MIRROR/iso/$ARCH_TRAVIS_ARCH_ISO/$archive" 2>&1
+  #   local ret=$?
 
-    # if it fails, try arch iso form the previous month
-    if [ $? -gt 0 ]; then
-      ARCH_TRAVIS_ARCH_ISO="$(date +%Y.%m -d "-1 month").01"
-      archive="archlinux-bootstrap-$ARCH_TRAVIS_ARCH_ISO-x86_64.tar.gz"
-      as_normal "curl -O $ARCH_TRAVIS_MIRROR/iso/$ARCH_TRAVIS_ARCH_ISO/$archive"
-    fi
-  fi
+  #   # if it fails, try arch iso form the previous month
+  #   if [ $ret -gt 0 ]; then
+  #     ARCH_TRAVIS_ARCH_ISO="$(date +%Y.%m -d "-1 month").01"
+  #     archive="archlinux-bootstrap-$ARCH_TRAVIS_ARCH_ISO-${ARCH_TRAVIS_ARCH}.tar.gz"
+  #     as_normal "curl -O $ARCH_TRAVIS_MIRROR/iso/$ARCH_TRAVIS_ARCH_ISO/$archive"
+  #   fi
+  # fi
+
+  get_base_archive
 
   # extract root fs
-  as_root "tar xf $archive"
+  as_root "tar xf $ARCH_TRAVIS_ROOT_ARCHIVE -C $HOME"
 
   # remove archive if ARCH_TRAVIS_CLEAN_CHROOT is set
   if [ -n "$ARCH_TRAVIS_CLEAN_CHROOT" ]; then
-    as_root "rm $archive"
+    as_root "rm $ARCH_TRAVIS_ROOT_ARCHIVE"
   fi
 
   if [ "$ARCH_TRAVIS_CHROOT" != "$default_root" ]; then
-    as_root "mv $default_root $ARCH_TRAVIS_CHROOT"
+    as_root "mv $HOME/$default_root $HOME/$ARCH_TRAVIS_CHROOT"
   fi
+
+  ARCH_TRAVIS_CHROOT="$HOME/$ARCH_TRAVIS_CHROOT"
 
   # don't care for signed packages
   as_root "sed -i 's|SigLevel    = Required DatabaseOptional|SigLevel = Never|' $ARCH_TRAVIS_CHROOT/etc/pacman.conf"
@@ -100,16 +144,19 @@ setup_chroot() {
   chroot_as_root "locale-gen"
 
   # setup non-root user
-  chroot_as_root "useradd -u $user_uid -m -s /bin/bash $user"
+  chroot_as_root "useradd -u $uid -m -s /bin/bash $user"
 
   # disable password for sudo users
   as_root "echo \"$user ALL=(ALL) NOPASSWD: ALL\" >> $ARCH_TRAVIS_CHROOT/etc/sudoers.d/$user"
 
-  # Add build dir
-  chroot_as_root "mkdir $user_build_dir && chown $user $user_build_dir"
-
-  # bind $TRAVIS_BUILD_DIR to chroot build dir
-  sudo mount --bind $TRAVIS_BUILD_DIR $ARCH_TRAVIS_CHROOT$user_build_dir
+  # mount HOME dirs
+  for d in $HOME/*/; do
+    if [ "$d" != "$ARCH_TRAVIS_CHROOT/" ]; then
+      dir="$user_home/$(basename "$d")"
+      chroot_as_root "mkdir -p $dir && chown $user $dir"
+      sudo mount --bind "$d" "$ARCH_TRAVIS_CHROOT$dir"
+    fi
+  done
 
   # add custom repos
   add_repositories
@@ -142,27 +189,35 @@ sudo_wrapper() {
 
 # run command as normal user
 as_normal() {
-  local str="$@"
-  run /bin/bash -c "$str"
+  local cmd="$@"
+  run /bin/bash -c "$cmd"
 }
 
 # run command as root
 as_root() {
-  local str="$@"
-  run sudo_wrapper /bin/bash -c "$str"
+  local cmd="$@"
+  run sudo_wrapper /bin/bash -c "$cmd"
 }
 
 # run command in chroot as root
 chroot_as_root() {
-  local str="$@"
-  run sudo_wrapper chroot $ARCH_TRAVIS_CHROOT /bin/bash -c "$str"
+  local cmd="$@"
+  run sudo_wrapper setarch $ARCH_TRAVIS_ARCH chroot \
+    $ARCH_TRAVIS_CHROOT /bin/bash -c "$cmd"
+}
+
+# execute command in chroot as normal user
+_chroot_as_normal() {
+  local cmd="$@"
+  sudo_wrapper setarch $ARCH_TRAVIS_ARCH chroot \
+    --userspec=$uid:$uid $ARCH_TRAVIS_CHROOT /bin/bash \
+    -c "cd $user_build_dir && $cmd"
 }
 
 # run command in chroot as normal user
 chroot_as_normal() {
-  local str="$@"
-  run sudo_wrapper chroot --userspec=$user:$user $ARCH_TRAVIS_CHROOT /bin/bash \
-      -c "export HOME=$user_home USER=$user TRAVIS_BUILD_DIR=$user_build_dir && cd $user_build_dir && $str"
+  local cmd="$@"
+  run _chroot_as_normal "$cmd"
 }
 
 # run command
@@ -180,7 +235,7 @@ run() {
 run_build_script() {
   local cmd="$@"
   echo "$ $cmd"
-  sudo_wrapper chroot --userspec=$user:$user $ARCH_TRAVIS_CHROOT /bin/bash -c "export HOME=$user_home USER=$user TRAVIS_BUILD_DIR=$user_build_dir && cd $user_build_dir && $cmd"
+  _chroot_as_normal "$cmd"
   local ret=$?
 
   if [ $ret -gt 0 ]; then
@@ -191,18 +246,23 @@ run_build_script() {
 
 # setup pacaur
 setup_pacaur() {
-  local cowerarchive="cower.tar.gz"
-  local aururl="https://aur.archlinux.org/cgit/aur.git/snapshot/"
-  # install cower
-  as_normal "curl -O $aururl/$cowerarchive"
-  as_normal "tar xf $cowerarchive"
-  chroot_as_normal "cd cower && makepkg -is --skippgpcheck --noconfirm"
-  as_root "rm -r cower"
-  as_normal "rm $cowerarchive"
-  # install pacaur
-  chroot_as_normal "cower -dd pacaur"
-  chroot_as_normal "cd pacaur && makepkg -is --noconfirm"
-  chroot_as_normal "rm -rf pacaur"
+  # Check if pacaur is available in the added repos
+  if _chroot_as_normal "pacman -Si pacaur &> /dev/null"; then
+    chroot_as_root "pacman -S --noconfirm pacaur"
+  else
+    local cowerarchive="cower.tar.gz"
+    local aururl="https://aur.archlinux.org/cgit/aur.git/snapshot/"
+    # install cower
+    as_normal "curl -O $aururl/$cowerarchive"
+    as_normal "tar xf $cowerarchive"
+    chroot_as_normal "cd cower && makepkg -is --skippgpcheck --noconfirm"
+    as_root "rm -r cower"
+    as_normal "rm $cowerarchive"
+    # install pacaur
+    chroot_as_normal "cower -dd pacaur"
+    chroot_as_normal "cd pacaur && makepkg -is --noconfirm"
+    chroot_as_normal "rm -rf pacaur"
+  fi
 }
 
 # install package through pacaur
@@ -215,7 +275,12 @@ _pacaur() {
 # unmounts anything mounted in the chroot setup
 takedown_chroot() {
   sudo umount $ARCH_TRAVIS_CHROOT/{run,dev/shm,dev/pts,dev,sys,proc}
-  sudo umount $ARCH_TRAVIS_CHROOT$user_build_dir
+  # umount HOME dirs
+  for d in $HOME/*/; do
+    if [ "$d" != "$ARCH_TRAVIS_CHROOT/" ]; then
+      sudo umount "$ARCH_TRAVIS_CHROOT$user_home/$(basename "$d")"
+    fi
+  done
   sudo umount $ARCH_TRAVIS_CHROOT
 
   if [ -n "$ARCH_TRAVIS_CLEAN_CHROOT" ]; then
@@ -229,7 +294,7 @@ travis_yml() {
 }
 
 read_config() {
-    old_ifs=$IFS
+    local old_ifs=$IFS
     IFS=$'\n'
     CONFIG_BUILD_SCRIPTS=($(travis_yml arch script))
     CONFIG_PACKAGES=($(travis_yml arch packages))

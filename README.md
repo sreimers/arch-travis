@@ -46,7 +46,6 @@ By default the following packages are installed and usable from within the
 build environment.
 
 * base-devel (group)
-* [ruby](https://www.archlinux.org/packages/extra/x86_64/ruby/)
 * [git](https://www.archlinux.org/packages/extra/x86_64/git/)
 * [cower](https://aur.archlinux.org/packages/cower/)
 * [pacaur](https://aur.archlinux.org/packages/pacaur/)
@@ -90,16 +89,16 @@ The following variables are available:
 
 `ARCH_TRAVIS_MIRROR` Arch Linux mirror used by pacman. See list of available
 mirrors [here][arch-mirrors]. Omit the `/$repo/os/$arch` part of the mirror
-when defining this variable. (default is `https://lug.mtu.edu/archlinux`)
+when defining this variable. (default is `https://mirrors.lug.mtu.edu/archlinux`)
 
 > Note some https mirrors are not supported due to [#4757][travis-issue-4757].
-
-`ARCH_TRAVIS_ARCH_ISO` Arch iso date from which the chroot is bootstraped.
-(default is the latest iso date, updated about once a month).
 
 `ARCH_TRAVIS_CLEAN_CHROOT` by default the chroot archive and chroot folder is
 left in `$TRAVIS_BUILD_DIR`, if you don't want this, then you can make
 arch-travis remove them by enabling `ARCH_TRAVIS_CLEAN_CHROOT`.
+
+`ARCH_TRAVIS_ARCH` Set the default architecture to use in the chroot. Valid
+values are `x86_64` (default) and `i686`.
 
 To use, just add the variable to the `env` section of `.travis.yml`.
 
@@ -121,13 +120,6 @@ language: c
 
 compiler: clang
 ```
-
-
-## Contributing
-
-If you want to send a PR please do so against the `dev` branch, that way it can
-be tested to make sure that it doesn't break anything in `master` which people
-might depend on.
 
 ## Projects using arch-travis
 
